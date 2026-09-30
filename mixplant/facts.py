@@ -25,6 +25,8 @@ CHUTE_OPEN = "chute.door_open"
 TRUCK_LOADED = "chute.loaded"
 PUMP_RUNNING = "pump.running"
 SAMPLER_LATCHED = "sampler.latched"
+SAMPLER_DEVICE_OFFLINE = "sampler.device_offline"
+GRADE_HELD = "sampling.grade_held"
 MOIST_COMPENSATED = "moist.compensated"
 
 
@@ -49,6 +51,22 @@ def _latch(state: Mapping[str, Any], group: str) -> bool:
     return bool(entry.get("active", False)) if isinstance(entry, Mapping) else False
 
 
+def _sampler_offline(state: Mapping[str, Any]) -> bool:
+    node = state.get("sampling")
+    if not isinstance(node, Mapping):
+        return False
+    entry = node.get("device")
+    return isinstance(entry, Mapping) and not bool(entry.get("online", True))
+
+
+def _any_grade_held(state: Mapping[str, Any]) -> bool:
+    node = state.get("sampling")
+    if not isinstance(node, Mapping):
+        return False
+    entry = node.get("hold")
+    return bool(entry.get("active", False)) if isinstance(entry, Mapping) else False
+
+
 def derive_facts(state: Mapping[str, Any]) -> dict[str, bool]:
     """Translate derived state into the boolean facts gates evaluate."""
 
@@ -69,5 +87,7 @@ def derive_facts(state: Mapping[str, Any]) -> dict[str, bool]:
         TRUCK_LOADED: flag(state, "chute.load"),
         PUMP_RUNNING: flag(state, "pump.run"),
         SAMPLER_LATCHED: _latch(state, "sampler"),
+        SAMPLER_DEVICE_OFFLINE: _sampler_offline(state),
+        GRADE_HELD: _any_grade_held(state),
         MOIST_COMPENSATED: flag(state, "moist.comp"),
     }

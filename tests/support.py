@@ -14,6 +14,21 @@ RECIPE = {
 }
 
 
+def recipe_for(grade: str, *, name: str | None = None) -> dict[str, Any]:
+    """Build a recipe document for any catalogue grade."""
+
+    document = dict(RECIPE)
+    document["grade"] = grade
+    document["name"] = name or f"mix-{grade.lower()}"
+    return document
+
+
+def publish_and_select_grade(runtime: PlantRuntime, grade: str, *, name: str | None = None) -> None:
+    document = recipe_for(grade, name=name)
+    run(runtime, "recipe.publish", document)
+    run(runtime, "recipe.select", {"name": document["name"]})
+
+
 def run(runtime: PlantRuntime, command: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """Dispatch one command and return the result."""
 

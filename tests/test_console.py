@@ -17,12 +17,12 @@ from tests.support import publish_and_select
 
 
 def test_pages_are_declared() -> None:
-    assert set(PAGES) == {"recipe", "batch", "discharge", "alarms"}
+    assert set(PAGES) == {"recipe", "batch", "discharge", "sampling", "alarms"}
 
 
 def test_every_page_renders_with_live_state(runtime: PlantRuntime) -> None:
     store = PageStore(runtime.config.web_dir)
-    assert store.names() == ("alarms", "batch", "discharge", "recipe")
+    assert store.names() == ("alarms", "batch", "discharge", "recipe", "sampling")
     for name in store.names():
         page = store.load(name)
         rendered = inject_snapshot(page, runtime.state())
@@ -87,9 +87,22 @@ def test_console_serves_state_and_commands(runtime: PlantRuntime) -> None:
     publish_and_select(runtime)
     recipes = server.handle(Request(method="GET", path="/api/recipes"))
     assert json.loads(recipes.text)["book"]["selected"] == "mix-a"
-    for path in ("/api/batch", "/api/cycle", "/api/discharge", "/api/alarms", "/api/state", "/api/plant"):
+    for path in ("/api/batch", "/api/cycle", "/api/discharge", "/api/sampling", "/api/alarms", "/api/state", "/api/plant"):
         assert server.handle(Request(method="GET", path=path)).status == 200
     assert server.handle(Request(method="GET", path="/api/diagnostics")).ok is True
+
+
+def test_sampling_page_and_routes_are_served(runtime: PlantRuntime) -> None:
+    server = ConsoleServer(runtime, pages=PageStore(runtime.config.web_dir))
+    page = server.handle(Request(method="GET", path="/pages/sampling"))
+    assert page.status == 200
+    assert b"Sampling governance" in page.text.encode("utf-8")
+    opened = server.handle(
+        Request(method="POST", path="/api/sampling/open_shift", body={"shift_id": "S-1", "crew": "day"})
+    )
+    assert opened.ok is True
+    view = json.loads(server.handle(Request(method="GET", path="/api/sampling")).text)
+    assert view["shift"]["shift_id"] == "S-1"
 
 
 def test_console_returns_a_validation_error(runtime: PlantRuntime) -> None:

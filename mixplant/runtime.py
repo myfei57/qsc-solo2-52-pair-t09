@@ -34,6 +34,13 @@ from .pump.service import PumpService
 from .recipe.recipe import Recipe
 from .recipe.service import RecipeService
 from .sampler.service import SamplerService
+from .sampling.governor import SamplingGovernor
+from .sampling.kinds import (
+    DEVICE_KIND as SAMPLING_DEVICE_KIND,
+    GRADE_KIND as SAMPLING_GRADE_KIND,
+    OBLIGATION_KIND as SAMPLING_OBLIGATION_KIND,
+    SHIFT_KIND as SAMPLING_SHIFT_KIND,
+)
 from .service_base import PlantService
 from .statemachine.gate import PreGate
 from .statemachine.machine import SequenceMachine
@@ -101,15 +108,19 @@ class PlantRuntime:
             ids=self.ids,
         )
         self.recipes = RecipeService(self.context, self.topology, self.machines["batch"])
-        self.agg = AggService(self.context, self.recipes, self.machines["batch"])
+        self.sampling = SamplingGovernor(self.context)
+        self.agg = AggService(self.context, self.recipes, self.machines["batch"], sampling=self.sampling)
         self.moist = MoistService(self.context, self.recipes.book, default_table(), self.machines["batch"])
         self.cement = CementService(self.context, self.machines["mix"])
         self.water = WaterService(self.context, self.machines["mix"])
         self.mix = MixService(self.context, self.recipes, self.machines["mix"])
         self.chute = ChuteService(self.context, self.recipes, self.machines["mix"])
         self.pump = PumpService(self.context, self.machines["delivery"])
-        self.sampler = SamplerService(self.context, self.recipes, self.machines["delivery"])
+        self.sampler = SamplerService(
+            self.context, self.recipes, self.machines["delivery"], sampling=self.sampling
+        )
         self.audit = AuditService(self.context, self.machines["batch"], alarms=self.alarms)
+        self.audit_subscriber.attach_ledger(self.audit.ledger)
         self.controller = PlantController(self)
         self.boot_report: RestoreReport | None = None
         self._services: dict[str, PlantService] = {
@@ -122,6 +133,7 @@ class PlantRuntime:
             "chute": self.chute,
             "pump": self.pump,
             "sampler": self.sampler,
+            "sampling": self.sampling,
             "audit": self.audit,
         }
         self._wire_bus()
@@ -228,6 +240,14 @@ class PlantRuntime:
                     1,
                     validity=Validity.never(record.tick),
                 )
+            elif record.kind == SAMPLING_OBLIGATION_KIND:
+                self.sampling.adopt_obligation(dict(record.payload))
+            elif record.kind == SAMPLING_GRADE_KIND:
+                self.sampling.adopt_grade(dict(record.payload))
+            elif record.kind == SAMPLING_SHIFT_KIND:
+                self.sampling.adopt_shift(dict(record.payload))
+            elif record.kind == SAMPLING_DEVICE_KIND:
+                self.sampling.adopt_device(dict(record.payload))
         self.moist.sync(corrections)
 
     def _hydrate_machines(self) -> None:
@@ -459,6 +479,15 @@ class PlantRuntime:
             "sampler.draw": lambda payload: self.sampler.draw(litres=number(payload, "litres")),
             "sampler.release": lambda payload: self.sampler.release(),
             "sampler.file": lambda payload: self._file_sample(number(payload, "litres")),
+            "sampler.offline": lambda payload: self.sampling.device_disconnected(),
+            "sampler.online": lambda payload: self.sampling.device_connected(),
+            "sampling.open_shift": lambda payload: self.sampling.open_shift(
+                shift_id=text(payload, "shift_id"), crew=text(payload, "crew")
+            ),
+            "sampling.handover": lambda payload: self.sampling.handover(),
+            "sampling.release_hold": lambda payload: self.sampling.release_hold(
+                grade=text(payload, "grade"), reason=text(payload, "reason")
+            ),
             "audit.note": lambda payload: self.audit.note(
                 text(payload, "name"), self._detail(payload)
             ),
@@ -488,7 +517,16 @@ class PlantRuntime:
         handler = self.commands().get(command)
         if handler is None:
             raise NotFoundError("unknown command", command=command)
-        result = handler(payload or {})
+        try:
+            result = handler(payload or {})
+        except Exception as exc:
+            # A refused sampling action (or a declaration stopped by a grade
+            # hold) is itself evidence the interlock engaged, so it is booked
+            # into the audit ledger alongside the successful prompts, holds
+            # and releases.
+            if command.startswith(("sampler.", "sampling.", "batch.")):
+                self._audit_refusal(command, exc)
+            raise
         return {
             "command": command,
             "tick": self.clock.now(),
@@ -496,6 +534,15 @@ class PlantRuntime:
             "watermark": self.store.watermark().describe(),
             "alarms": self.alarms.count(),
         }
+
+    def _audit_refusal(self, command: str, exc: Exception) -> None:
+        """Book a refused sampling action into the shift ledger."""
+
+        code = getattr(exc, "code", "error")
+        self.audit.note(
+            "sampling.action_refused",
+            {"command": command, "code": code, "message": str(getattr(exc, "message", exc))},
+        )
 
     def close(self) -> None:
         self.store.close()

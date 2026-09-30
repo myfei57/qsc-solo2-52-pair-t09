@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sampling governance</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: #f5f6f8; color: #1c1f24; }
+    table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 1rem; }
+    th, td { border: 1px solid #d7dbe0; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.9rem; }
+    form { background: #fff; padding: 1rem; border: 1px solid #d7dbe0; margin-bottom: 1rem; }
+    input, button { padding: 0.35rem 0.5rem; margin: 0.2rem; }
+    nav a { margin-right: 0.8rem; }
+    .hold { color: #8a1f1f; font-weight: 700; }
+    .ok { color: #1f6b34; font-weight: 600; }
+    .offline { color: #8a1f1f; font-weight: 700; }
+    h2 { margin-top: 1.5rem; }
+  </style>
+</head>
+<body>
+  <nav><a href="/pages/recipe">recipe</a><a href="/pages/batch">batch</a><a href="/pages/discharge">discharge</a><a href="/pages/sampling">sampling</a><a href="/pages/alarms">alarms</a></nav>
+  <h1>Sampling governance</h1>
+
+  <p>Device <span id="device"></span> &nbsp;|&nbsp; Shift <span id="shift"></span></p>
+
+  <form id="open_shift">
+    <input name="shift_id" value="S-1"><input name="crew" value="day">
+    <button type="submit">open shift</button>
+  </form>
+  <form id="handover"><button type="submit">hand over shift (settle misses)</button></form>
+  <form id="release_hold">
+    <input name="grade" value="C30"><input name="reason" value="QA authorised release">
+    <button type="submit">release grade hold</button>
+  </form>
+  <form id="offline"><button type="submit">mark sampler offline</button></form>
+  <form id="online"><button type="submit">mark sampler online</button></form>
+
+  <h2>Due now (prompt)</h2>
+  <table id="prompt"><thead><tr><th>batch</th><th>grade</th><th>opened tick</th><th>shift</th></tr></thead><tbody></tbody></table>
+
+  <h2>Held grades</h2>
+  <table id="held"><thead><tr><th>grade</th><th>consecutive misses</th><th>batches since sample</th></tr></thead><tbody></tbody></table>
+
+  <h2>Frequency table</h2>
+  <table id="rules"><thead><tr><th>grade</th><th>sample every N batches</th><th>hold after N misses</th></tr></thead><tbody></tbody></table>
+
+  <h2>Last handover report</h2>
+  <pre id="report">no handover yet</pre>
+
+  <script id="plant-state" type="application/json"><!--STATE--></script>
+  <script>
+    const view = JSON.parse(document.getElementById('plant-state').textContent || '{}');
+    const sampling = view.sampling || {};
+
+    const device = document.getElementById('device');
+    device.textContent = (sampling.device && sampling.device.status) || 'unknown';
+    device.className = (sampling.device && sampling.device.online) ? 'ok' : 'offline';
+
+    document.getElementById('shift').textContent =
+      sampling.shift ? `${sampling.shift.shift_id} (${sampling.shift.crew})` : 'none open';
+
+    const promptBody = document.querySelector('#prompt tbody');
+    for (const item of (sampling.prompt || [])) {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td>${item.batch_id}</td><td>${item.grade}</td><td>${item.opened_tick}</td><td>${item.shift_id || '—'}</td>`;
+      promptBody.appendChild(row);
+    }
+
+    const heldGrades = new Set(sampling.held || []);
+    const heldBody = document.querySelector('#held tbody');
+    for (const grade of (sampling.grades || [])) {
+      if (!grade.held) continue;
+      const row = document.createElement('tr');
+      row.className = 'hold';
+      row.innerHTML = `<td>${grade.grade}</td><td>${grade.consecutive_misses}</td><td>${grade.batches_since_sample}</td>`;
+      heldBody.appendChild(row);
+    }
+    if (!heldBody.children.length) heldBody.innerHTML = '<tr><td colspan="3" class="ok">no grade held</td></tr>';
+
+    const rulesBody = document.querySelector('#rules tbody');
+    for (const rule of ((sampling.rules && sampling.rules.rules) || [])) {
+      const row = document.createElement('tr');
+      const mark = heldGrades.has(rule.grade) ? ' class="hold"' : '';
+      row.innerHTML = `<td${mark}>${rule.grade}</td><td>${rule.every_n_batches}</td><td>${rule.block_after_misses}</td>`;
+      rulesBody.appendChild(row);
+    }
+    const fallback = sampling.rules && sampling.rules.fallback;
+    if (fallback) {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td><em>${fallback.grade} (fallback)</em></td><td>${fallback.every_n_batches}</td><td>${fallback.block_after_misses}</td>`;
+      rulesBody.appendChild(row);
+    }
+
+    if (sampling.last_report) document.getElementById('report').textContent = JSON.stringify(sampling.last_report, null, 2);
+
+    async function post(path, form) {
+      const entries = form ? Object.fromEntries(new FormData(form).entries()) : {};
+      const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entries) });
+      return response.json();
+    }
+    const routes = {
+      open_shift: '/api/sampling/open_shift',
+      handover: '/api/sampling/handover',
+      release_hold: '/api/sampling/release_hold',
+      offline: '/api/sampler/offline',
+      online: '/api/sampler/online'
+    };
+    for (const [id, path] of Object.entries(routes)) {
+      document.getElementById(id).addEventListener('submit', async (event) => { event.preventDefault(); console.log(await post(path, event.target)); location.reload(); });
+    }
+  </script>
+</body>
+</html>

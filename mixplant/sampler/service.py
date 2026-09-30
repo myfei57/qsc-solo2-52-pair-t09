@@ -24,16 +24,23 @@ class SamplerService(PlantService):
     line = "delivery"
     subject = "sampler"
 
-    def __init__(self, context, recipes: RecipeService, machine=None) -> None:
+    def __init__(self, context, recipes: RecipeService, machine=None, sampling=None) -> None:
         super().__init__(context, machine)
         self.recipes = recipes
+        self.sampling = sampling
         self.latch = Latch(DRAW_LATCH)
         self.batches = BatchSet()
         self._samples: list[dict[str, Any]] = []
 
     def draw(self, *, litres: float) -> dict[str, Any]:
-        """Draw a sample once the mixing window has finished."""
+        """Draw a sample once the mixing window has finished.
 
+        A sampler outage is a partial failure.  The draw is refused before
+        any state changes, so an offline device can never credit a sample.
+        """
+
+        if self.sampling is not None:
+            self.sampling.require_device_online()
         self.require("sampler.draw")
         batch = self.context.batches.latest()
         batch_id = require_next_batch(batch.batch_id if batch else None, self.batches.drawn())
@@ -70,7 +77,14 @@ class SamplerService(PlantService):
         self.publish(BATCHSET_KIND, {"active": True, **self.batches.describe()})
         self.emit("sampler.filed", record.describe())
         self._samples.append(record.describe())
-        return {"sample": record.describe(), "batchset": self.batches.describe()}
+        governed = None
+        if self.sampling is not None:
+            governed = self.sampling.record_sample(batch_id=batch.batch_id, grade=batch.grade)
+        return {
+            "sample": record.describe(),
+            "batchset": self.batches.describe(),
+            "governance": governed,
+        }
 
     def samples(self) -> tuple[Mapping[str, Any], ...]:
         return tuple(self._samples)
@@ -92,4 +106,5 @@ class SamplerService(PlantService):
                 batch_id=None if batch is None else batch.batch_id,
                 drawn=self.batches.drawn(),
             ),
+            "governance": None if self.sampling is None else self.sampling.status(),
         }

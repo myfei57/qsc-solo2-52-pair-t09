@@ -52,6 +52,17 @@ class InterlockBlockedError(MixPlantError):
     http_status = 409
 
 
+class PartialFailureError(MixPlantError):
+    """A peripheral needed to complete the action is unavailable.
+
+    A sampler offline during a draw is a partial failure: nothing was
+    sampled, so the batch must stay un sampled rather than be credited.
+    """
+
+    code = "partial_failure"
+    http_status = 503
+
+
 class ArtifactExpiredError(MixPlantError):
     """A confirmation, snapshot or baseline is past its validity window."""
 

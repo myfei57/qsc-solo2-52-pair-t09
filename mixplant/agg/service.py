@@ -46,9 +46,11 @@ class AggService(PlantService):
         context: SharedContext,
         recipes: RecipeService,
         machine: SequenceMachine | None = None,
+        sampling: Any = None,
     ) -> None:
         super().__init__(context, machine)
         self.recipes = recipes
+        self.sampling = sampling
         self._calibration = calibrate(slope=1.0, offset=0.0)
         self._reports: list[dict[str, Any]] = []
 
@@ -60,6 +62,15 @@ class AggService(PlantService):
         if self.machine.is_at(BatchPhase.IDLE.value):
             self.advance(BatchPhase.RECIPE_SELECTED.value, "batch declared against the selected recipe")
         recipe = self.recipes.current()
+        # A grade held for missed samples is stopped at the source: the
+        # declaration itself is refused, while other grades stay producible.
+        # The grade-specific fact is injected so only the selected grade's
+        # hold blocks this declaration, never the whole crew.
+        held_grade = False
+        if self.sampling is not None:
+            held_grade_state = self.sampling.grades.get(recipe.grade.code)
+            held_grade = held_grade_state is not None and held_grade_state.held
+        self.require("batch.declare", **{"sampling.grade_held": held_grade})
         plan = plan_batch(
             recipe,
             batch_id=batch_id,
@@ -75,8 +86,15 @@ class AggService(PlantService):
             quantity=quantity,
         )
         self.publish(BATCH_KIND, batch_payload(plan))
+        sampling: dict[str, Any] = {}
+        if self.sampling is not None:
+            sampling = self.sampling.enroll(batch_id=batch_id, grade=recipe.grade.code)
         self.emit("agg.batch_declared", {**batch.describe(), "targets": plan.describe()["materials"]})
-        return {"batch": batch.describe(), "batches": self.context.batches.count()}
+        return {
+            "batch": batch.describe(),
+            "batches": self.context.batches.count(),
+            "sampling": sampling,
+        }
 
     def map_bin(self, bin_name: str, material: str) -> dict[str, Any]:
         """Refresh the bin assignment for the selected recipe version."""

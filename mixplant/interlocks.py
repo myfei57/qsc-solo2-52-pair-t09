@@ -6,6 +6,7 @@ from .facts import (
     BIN_MAPPED,
     CEMENT_FED,
     CHUTE_OPEN,
+    GRADE_HELD,
     HOPPER_RELEASED,
     MIXER_RUNNING,
     MIX_TIMED,
@@ -33,6 +34,13 @@ DEFAULT_RULES: tuple[InterlockRule, ...] = (
         action="agg.map_bin",
         requires=(RECIPE_SELECTED,),
         message="bins are mapped for the recipe that is going to be batched",
+    ),
+    InterlockRule(
+        name="declare-needs-unheld-grade",
+        action="batch.declare",
+        requires=(RECIPE_SELECTED,),
+        forbids=(GRADE_HELD,),
+        message="a grade held for missed samples cannot declare another batch",
     ),
     InterlockRule(
         name="agg-weigh-needs-mapping",

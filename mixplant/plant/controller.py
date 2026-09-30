@@ -52,6 +52,20 @@ class PlantController:
             "counts": self.runtime.audit.counts(),
         }
 
+    def sampling_view(self) -> dict[str, Any]:
+        """Build the sampling governance view the console displays."""
+
+        status = self.runtime.sampling.status()
+        return {
+            "sampling": status,
+            "held": status["held"],
+            "prompt": status["prompt"],
+            "device": status["device"],
+            "shift": status["shift"],
+            "rules": status["rules"],
+            "last_report": status["last_report"],
+        }
+
     def manifest(self) -> dict[str, Any]:
         return describe_manifest(
             station=self.runtime.config.station,

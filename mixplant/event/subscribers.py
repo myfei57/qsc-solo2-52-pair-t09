@@ -12,13 +12,37 @@ AUDIT_KIND = "audit.event"
 
 
 class AuditSubscriber:
-    """Copies every topic event into the record stream."""
+    """Copies every topic event into the record stream.
 
-    __slots__ = ("_repository", "_seen")
+    When handed the in memory audit ledger it also books sampling relevant
+    events (prompts, holds, releases, outages) there, so the shift ledger
+    carries the same evidence the journal does.
+    """
 
-    def __init__(self, repository: RecordRepository) -> None:
+    AUDITED_NAMES = frozenset(
+        {
+            "sampling.sample_due",
+            "sampling.sample_recorded",
+            "sampling.shift_opened",
+            "sampling.shift_handed_over",
+            "sampling.hold_released",
+            "sampling.device_offline",
+            "sampling.device_online",
+            "sampling.grade_held",
+        }
+    )
+
+    __slots__ = ("_repository", "_seen", "_ledger")
+
+    def __init__(self, repository: RecordRepository, ledger: Any = None) -> None:
         self._repository = repository
         self._seen = 0
+        self._ledger = ledger
+
+    def attach_ledger(self, ledger: Any) -> None:
+        """Also book audited domain events into the in memory shift ledger."""
+
+        self._ledger = ledger
 
     def __call__(self, event: Event) -> None:
         self.handle(event)
@@ -31,6 +55,17 @@ class AuditSubscriber:
             {"topic": event.topic, "name": event.name, "origin": event.origin, "tick": event.tick},
         )
         self._seen += 1
+        if self._ledger is not None and event.name in self.AUDITED_NAMES:
+            from ..audit.record import audit_entry
+
+            self._ledger.record(
+                audit_entry(
+                    name=event.name,
+                    origin=event.origin,
+                    tick=event.tick,
+                    detail=dict(event.payload),
+                )
+            )
 
     def seen(self) -> int:
         """Return how many events were copied into the stream."""
