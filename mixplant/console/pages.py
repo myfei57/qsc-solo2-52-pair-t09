@@ -10,6 +10,7 @@ PAGES: dict[str, str] = {
     "recipe": "recipe.html",
     "batch": "batch.html",
     "discharge": "discharge.html",
+    "qa": "qa.html",
     "alarms": "alarms.html",
 }
 

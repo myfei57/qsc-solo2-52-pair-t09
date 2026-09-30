@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Sampling QA</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: #f5f6f8; color: #1c1f24; }
+    table { border-collapse: collapse; width: 100%; background: #fff; margin-bottom: 1rem; }
+    th, td { border: 1px solid #d7dbe0; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.9rem; }
+    form { background: #fff; padding: 1rem; border: 1px solid #d7dbe0; margin-bottom: 1rem; }
+    input, button { padding: 0.35rem 0.5rem; margin: 0.2rem; }
+    nav a { margin-right: 0.8rem; }
+    .due { color: #8a6100; }
+    .overdue, .blocked { color: #a3260b; font-weight: 600; }
+    .offline { color: #a3260b; font-weight: 600; }
+    .ok { color: #1d6b32; }
+  </style>
+</head>
+<body>
+  <nav><a href="/pages/recipe">recipe</a><a href="/pages/batch">batch</a><a href="/pages/discharge">discharge</a><a href="/pages/qa">sampling QA</a><a href="/pages/alarms">alarms</a></nav>
+  <h1>Sampling reminders and grade press</h1>
+  <p>Sampler device: <span id="sampler-state">unknown</span></p>
+  <form id="online"><input type="hidden" name="online" value="true"><button type="submit">sampler back online</button></form>
+  <form id="offline"><input type="hidden" name="online" value="false"><button type="submit">mark sampler offline</button></form>
+  <form id="handover"><button type="submit">shift handover report</button></form>
+  <form id="release"><input name="grade" value="C30"><button type="submit">release pressed grade (after makeup)</button></form>
+  <h2>Due samples</h2>
+  <table id="due"><thead><tr><th>grade</th><th>batch</th><th>opened</th><th>deadline</th><th>state</th></tr></thead><tbody></tbody></table>
+  <h2>Grade ledger</h2>
+  <table id="grades"><thead><tr><th>grade</th><th>every</th><th>completed</th><th>misses in a row</th><th>press after</th><th>state</th></tr></thead><tbody></tbody></table>
+  <script id="plant-state" type="application/json"><!--STATE--></script>
+  <script>
+    const state = JSON.parse(document.getElementById('plant-state').textContent || '{"due":[],"grades":[],"sampler":{}}');
+    const sampler = document.getElementById('sampler-state');
+    sampler.textContent = state.sampler && state.sampler.online ? 'online' : 'offline (draws count as unsampled)';
+    sampler.className = state.sampler && state.sampler.online ? 'ok' : 'offline';
+    const dueBody = document.querySelector('#due tbody');
+    for (const item of state.due || []) {
+      const row = document.createElement('tr');
+      row.className = 'due';
+      row.innerHTML = `<td>${item.grade}</td><td>${item.batch_id}</td><td>${item.opened_tick}</td><td>${item.deadline_tick}</td><td>due</td>`;
+      dueBody.appendChild(row);
+    }
+    const gradesBody = document.querySelector('#grades tbody');
+    for (const grade of state.grades || []) {
+      const row = document.createElement('tr');
+      const label = grade.blocked ? 'pressed' : (grade.overdue ? 'overdue' : 'open');
+      row.className = grade.blocked ? 'blocked' : (grade.overdue ? 'overdue' : 'ok');
+      row.innerHTML = `<td>${grade.grade}</td><td>${grade.every_batches}</td><td>${grade.completed}</td><td>${grade.misses_in_a_row}</td><td>${grade.block_after_misses}</td><td>${label}</td>`;
+      gradesBody.appendChild(row);
+    }
+    async function post(path, form) {
+      const entries = form ? Object.fromEntries(new FormData(form).entries()) : {};
+      const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(entries) });
+      return response.json();
+    }
+    const routes = { online: '/api/sampler/online', offline: '/api/sampler/online', handover: '/api/qa/handover', release: '/api/qa/release' };
+    for (const [id, path] of Object.entries(routes)) {
+      document.getElementById(id).addEventListener('submit', async (event) => { event.preventDefault(); console.log(await post(path, event.target)); location.reload(); });
+    }
+  </script>
+</body>
+</html>

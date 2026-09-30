@@ -36,6 +36,16 @@ EVENT_NAMES: Mapping[str, str] = {
     "sampler.drawn": "sampler",
     "sampler.released": "sampler",
     "sampler.filed": "sampler",
+    "qa.sample_due": "qa",
+    "qa.sample_missed": "qa",
+    "qa.grade_pressed": "qa",
+    "qa.grade_released": "qa",
+    "qa.due_cleared": "qa",
+    "qa.makeup_filed": "qa",
+    "qa.shift_handover": "qa",
+    "qa.sampler_online": "qa",
+    "qa.sampler_offline": "qa",
+    "qa.draw_while_offline": "qa",
 }
 
 

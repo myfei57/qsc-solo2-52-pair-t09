@@ -31,6 +31,18 @@ from .plant.controller import PlantController
 from .plant.status import compose_plant_status
 from .plant.tools import integer, number, optional_integer, optional_number, optional_text, text
 from .pump.service import PumpService
+from .qa.plan import SamplingPlan
+from .qa.qa import (
+    ATTEMPT_KIND,
+    BLOCK_KIND,
+    COMPLETION_KIND,
+    DEVICE_KIND,
+    DUE_KIND,
+    MISS_KIND,
+    SAMPLE_KIND,
+    SHIFT_KIND,
+)
+from .qa.service import QAService
 from .recipe.recipe import Recipe
 from .recipe.service import RecipeService
 from .sampler.service import SamplerService
@@ -62,6 +74,18 @@ EXTRA_DEVICES = (
     ("pump-1", DeviceKind.PUMP, "delivery"),
     ("sampler-1", DeviceKind.SAMPLER, "laboratory"),
     ("tank-1", DeviceKind.TANK, "batching water"),
+)
+
+
+QA_KINDS = (
+    COMPLETION_KIND,
+    DUE_KIND,
+    MISS_KIND,
+    BLOCK_KIND,
+    SAMPLE_KIND,
+    SHIFT_KIND,
+    DEVICE_KIND,
+    ATTEMPT_KIND,
 )
 
 
@@ -109,6 +133,7 @@ class PlantRuntime:
         self.chute = ChuteService(self.context, self.recipes, self.machines["mix"])
         self.pump = PumpService(self.context, self.machines["delivery"])
         self.sampler = SamplerService(self.context, self.recipes, self.machines["delivery"])
+        self.qa = QAService(self.context, SamplingPlan.default(), self.machines["batch"])
         self.audit = AuditService(self.context, self.machines["batch"], alarms=self.alarms)
         self.controller = PlantController(self)
         self.boot_report: RestoreReport | None = None
@@ -122,6 +147,7 @@ class PlantRuntime:
             "chute": self.chute,
             "pump": self.pump,
             "sampler": self.sampler,
+            "qa": self.qa,
             "audit": self.audit,
         }
         self._wire_bus()
@@ -228,6 +254,8 @@ class PlantRuntime:
                     1,
                     validity=Validity.never(record.tick),
                 )
+            elif record.kind in QA_KINDS and record.kind != ATTEMPT_KIND:
+                self.qa.adopt_record(record.kind, dict(record.payload))
         self.moist.sync(corrections)
 
     def _hydrate_machines(self) -> None:
@@ -369,12 +397,13 @@ class PlantRuntime:
             "watermark": self.store.watermark().describe(),
         }
 
-    def advance_ticks(self, ticks: int = 1) -> int:
-        """Move the deterministic clock forward and record where it went."""
+    def advance_ticks(self, ticks: int = 1) -> dict[str, Any]:
+        """Move the deterministic clock forward, then sweep sampling windows."""
 
         moved = self.clock.advance(ticks)
         self.store.publish(CLOCK_KIND, "console", 0, {"active": True, "tick": moved})
-        return moved
+        swept = self.qa.sweep()
+        return {"tick": moved, "qa": swept}
 
     def commands(self) -> dict[str, Callable[[Mapping[str, Any]], Any]]:
         """Return the command surface the console exposes."""
@@ -392,7 +421,7 @@ class PlantRuntime:
                 ),
             ),
             "recipe.select": lambda payload: self.recipes.select(text(payload, "name")),
-            "batch.declare": lambda payload: self.agg.declare_batch(
+            "batch.declare": lambda payload: self._declare_batch(
                 batch_id=text(payload, "batch_id"), quantity=number(payload, "quantity")
             ),
             "agg.map_bin": lambda payload: self.agg.map_bin(
@@ -445,7 +474,7 @@ class PlantRuntime:
             "chute.load": lambda payload: self.chute.load(
                 truck_id=text(payload, "truck_id"), volume_m3=number(payload, "volume_m3")
             ),
-            "chute.confirm": lambda payload: self.chute.confirm(
+            "chute.confirm": lambda payload: self._confirm_load(
                 truck_id=text(payload, "truck_id"), volume_m3=number(payload, "volume_m3")
             ),
             "chute.close": lambda payload: self.chute.close_door(),
@@ -456,9 +485,15 @@ class PlantRuntime:
                 reading_mpa=number(payload, "reading_mpa")
             ),
             "pump.finish": lambda payload: self.pump.finish(),
-            "sampler.draw": lambda payload: self.sampler.draw(litres=number(payload, "litres")),
+            "sampler.draw": lambda payload: self._sampler_draw(litres=number(payload, "litres")),
             "sampler.release": lambda payload: self.sampler.release(),
             "sampler.file": lambda payload: self._file_sample(number(payload, "litres")),
+            "sampler.online": lambda payload: self.qa.set_sampler_online(
+                str(payload.get("online", "true")).lower() in {"1", "true", "yes"}
+            ),
+            "qa.release": lambda payload: self.qa.release_grade(text(payload, "grade")),
+            "qa.handover": lambda payload: self.qa.handover(),
+            "qa.sweep": lambda payload: self.qa.sweep(),
             "audit.note": lambda payload: self.audit.note(
                 text(payload, "name"), self._detail(payload)
             ),
@@ -479,7 +514,7 @@ class PlantRuntime:
             "store.rollback": lambda payload: self.rollback(
                 integer(payload, "seq"), reason=optional_text(payload, "reason", "operator rollback")
             ),
-            "clock.advance": lambda payload: {"tick": self.advance_ticks(integer(payload, "ticks"))},
+            "clock.advance": lambda payload: self.advance_ticks(integer(payload, "ticks")),
         }
 
     def dispatch(self, command: str, payload: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -504,11 +539,41 @@ class PlantRuntime:
         """File a laboratory sample and copy it into the ledger."""
 
         result = self.sampler.file(litres=litres)
+        sample = result["sample"]
+        self.qa.sample_filed(
+            batch_id=str(sample["batch_id"]),
+            grade=str(sample["grade"]),
+            sample_id=str(sample["sample_id"]),
+        )
         self.audit.note_sample(
-            batch_id=str(result["sample"]["batch_id"]),
-            sample_id=str(result["sample"]["sample_id"]),
+            batch_id=str(sample["batch_id"]),
+            sample_id=str(sample["sample_id"]),
         )
         return result
+
+    def _declare_batch(self, *, batch_id: str, quantity: float) -> dict[str, Any]:
+        """Declare a batch, refusing to pour a grade that is pressed."""
+
+        grade = self.recipes.current().grade.code
+        self.qa.require_grade_allowed(grade)
+        return self.agg.declare_batch(batch_id=batch_id, quantity=quantity)
+
+    def _confirm_load(self, *, truck_id: str, volume_m3: float) -> dict[str, Any]:
+        """Confirm a truck load and account the batch as completed for QA."""
+
+        result = self.chute.confirm(truck_id=truck_id, volume_m3=volume_m3)
+        batch_id = str(result["confirmed"]["batch_id"])
+        batch = self.batches.find(batch_id)
+        if batch is not None:
+            result["qa"] = self.qa.batch_completed(batch_id=batch_id, grade=batch.grade)
+        return result
+
+    def _sampler_draw(self, *, litres: float) -> dict[str, Any]:
+        """Draw a sample only while the sampling device is online."""
+
+        batch = self.context.batches.latest()
+        self.qa.require_sampler_online(batch_id="" if batch is None else batch.batch_id)
+        return self.sampler.draw(litres=litres)
 
     @staticmethod
     def _factors(payload: Mapping[str, Any]) -> dict[str, float]:
